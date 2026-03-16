@@ -1,0 +1,61 @@
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+- group: MySecureVariables  # Contient TenantId, ClientId, ClientSecret, SourceEnvironmentId, TargetEnvironmentId
+
+steps:
+
+# Étape 1 : Installer les modules PowerShell requis
+- task: PowerShell@2
+  displayName: "Installer les modules PowerShell Power Platform"
+  inputs:
+    targetType: 'inline'
+    script: |
+      Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
+      Install-Module -Name Microsoft.PowerApps.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
+
+# Étape 2 : Authentification + Copie dans la même session PowerShell
+- task: PowerShell@2
+  displayName: "Authentification + Copie de l'environnement Power Platform"
+  timeoutInMinutes: 360
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Authentification via SPN
+      Write-Host "Authentification avec Add-PowerAppsAccount..."
+      Add-PowerAppsAccount `
+        -Endpoint prod `
+        -TenantID "$(TenantId)" `
+        -ApplicationId "$(ClientId)" `
+        -ClientSecret "$(ClientSecret)" `
+        -Verbose
+
+      # Préparation des paramètres de copie
+      $copyToRequest = [pscustomobject]@{
+          SourceEnvironmentId = "$(SourceEnvironmentId)"
+          TargetEnvironmentName = "Copied from source"
+          CopyType = "FullCopy"
+          SkipAuditData = $true
+          ExecuteAdvancedCopyForFinanceAndOperations = $true
+      }
+
+      Write-Host "Début de la copie de l'environnement..."
+      try {
+          $result = Copy-PowerAppEnvironment `
+              -EnvironmentName "$(TargetEnvironmentId)" `
+              -CopyToRequestDefinition $copyToRequest `
+              -WaitUntilFinished $true `
+              -TimeoutInMinutes 180 `
+              -Verbose `
+              -ErrorAction Stop
+
+          Write-Host "✅ Copie lancée avec succès."
+          Write-Host "Résultat : $($result | Out-String)"
+      }
+      catch {
+          Write-Error "❌ Erreur lors de la copie de l'environnement : $_"
+          exit 1
+      }

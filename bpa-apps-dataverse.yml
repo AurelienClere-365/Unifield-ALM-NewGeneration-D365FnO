@@ -1,0 +1,205 @@
+trigger: none  # No automatic trigger (run this pipeline manually or on a schedule)
+
+# Secure variables required (stored in a group like MySecureVariables):
+# - TenantId: Azure AD tenant ID (GUID)
+# - ClientId: Azure AD application (SPN) client ID
+# - ClientSecret: Azure AD application secret (keep secure)
+# - EnvironmentId: GUID of the target Power Platform environment
+# - TenantApiBase: Base URL for Power Platform API (usually "https://api.powerplatform.com")
+# - PowerPlatformScope: OAuth2 scope for Power Platform API ("https://api.powerplatform.com/.default")
+variables:
+- group: MySecureVariables
+
+pool:
+  vmImage: 'windows-latest'
+
+jobs:
+- job: ListAndInstallBPA
+  displayName: "List Power Platform apps and optionally install BPA"
+  steps:
+    # Step 1: Authenticate using the Service Principal (SPN) and get an OAuth2 token for the Power Platform API
+    - task: PowerShell@2
+      displayName: "SPN Authentication (Get API Token)"
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "🔐 Acquiring API access token via service principal..."
+          # Prepare client credentials for OAuth2 token request
+          $body = @{
+            client_id     = "$(ClientId)"
+            client_secret = "$(ClientSecret)"
+            grant_type    = "client_credentials"
+            scope         = "$(PowerPlatformScope)"  # e.g., "https://api.powerplatform.com/.default"
+          }
+          # Request the token from Azure AD
+          $response = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" -Body $body
+          $token = $response.access_token
+          if (-not $token) {
+            Write-Error "❌ Failed to obtain access token. Check SPN credentials and permissions."
+            exit 1
+          }
+          # Save the token to a pipeline variable for reuse
+          Write-Host "##vso[task.setvariable variable=PowerPlatformToken;issecret=true]$token"
+          Write-Host "✅ Access token acquired (length $($token.Length) characters)."
+
+    # Step 2: List all applications (installed vs. available) and identify BPA-related apps
+    - task: PowerShell@2
+      displayName: "List installed and available applications"
+      env:
+        PowerPlatformToken: $(PowerPlatformToken)  # Provide the access token to the script
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "🔎 Fetching applications via Power Platform API..."
+          # Call the API to get all application packages in the environment
+          $headers = @{ Authorization = "Bearer $env:PowerPlatformToken" }
+          $url = "$(TenantApiBase)/appmanagement/environments/$(EnvironmentId)/applicationPackages?api-version=2022-03-01-preview&lcid=1033"
+          try {
+            $response = Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
+          } catch {
+            Write-Error "❌ API call failed (GET applicationPackages): $_"
+            exit 1
+          }
+          $packages = $response.value
+          if (-not $packages) {
+            Write-Error "❌ No applications returned by API. (Verify EnvironmentId and SPN permissions.)"
+            exit 1
+          }
+
+          # Separate installed vs. not installed applications
+          $installedApps    = $packages | Where-Object { $_.state -eq "Installed" }
+          $notInstalledApps = $packages | Where-Object { $_.state -ne "Installed" }
+
+          # Identify BPA-related applications based on name/publisher keywords
+          $bpaCandidates = $packages | Where-Object {
+            $_.uniqueName -match "Analytics|Performance|ProcessMining" -or `
+            $_.applicationName -match "Analytics|Performance|Process Mining" -or `
+            $_.localizedName -match "Analytics|Performance|Process Mining" -or `
+            $_.publisherName -match "Microsoft Dynamics 365"
+          }
+          $bpaUniqueNames = $bpaCandidates.uniqueName
+
+          # Log installed applications
+          Write-Host "=== 📂 Installed Applications ($($installedApps.Count)) ==="
+          if ($installedApps.Count -gt 0) {
+            foreach ($app in $installedApps) {
+              $tag = ""
+              if ($bpaUniqueNames -contains $app.uniqueName) { $tag = "[BPA]" }
+              Write-Host "- $($app.localizedName) (UniqueName=$($app.uniqueName)) v$($app.version) **Installed** $tag"
+            }
+          } else {
+            Write-Host "(No applications are currently installed.)"
+          }
+
+          # Log available (not installed) applications
+          Write-Host "`n=== 📦 Available (Not Installed) Applications ($($notInstalledApps.Count)) ==="
+          if ($notInstalledApps.Count -gt 0) {
+            foreach ($app in $notInstalledApps) {
+              $tag = ""
+              if ($bpaUniqueNames -contains $app.uniqueName) { $tag = "[BPA]" }
+              Write-Host "- $($app.localizedName) (UniqueName=$($app.uniqueName)) v$($app.version) **Not Installed** $tag"
+            }
+          } else {
+            Write-Host "(No applications are available for installation.)"
+          }
+
+          # If the BPA package (msdyn_BpaAnchor) is present, save its info for installation
+          $bpaPackage = $packages | Where-Object { $_.uniqueName -eq "msdyn_BpaAnchor" }
+          if ($bpaPackage) {
+            $bpaJson = $bpaPackage | ConvertTo-Json -Depth 10 -Compress
+            Write-Host "##vso[task.setvariable variable=BpaPackageJson]$bpaJson"
+            Write-Host "`nℹ️ BPA package 'msdyn_BpaAnchor' found (state=$($bpaPackage.state), version=$($bpaPackage.version))."
+          } else {
+            Write-Host "`n⚠️ BPA package 'msdyn_BpaAnchor' is not listed in this environment."
+          }
+
+          # Check for any available updates (same UniqueName with multiple versions)
+          $groups = $packages | Group-Object uniqueName
+          $duplicates = $groups | Where-Object { $_.Count -gt 1 }
+          if ($duplicates.Count -gt 0) {
+            Write-Host "`n=== 🔄 Available Updates ($($duplicates.Count)) ==="
+            foreach ($dup in $duplicates) {
+              $allVersions = $dup.Group | Sort-Object {[Version]$_.version} -Descending
+              $latest = $allVersions[0]
+              $oldest = $allVersions[-1]
+              $appName = $latest.localizedName
+              if ($oldest.state -eq "Installed" -and $latest.state -ne "Installed") {
+                Write-Host "⚠️ Update available for **$appName**: installed v$($oldest.version) → available v$($latest.version)"
+              } else {
+                Write-Host "⚠️ Multiple versions found for **$appName** (versions: $($allVersions.version -join ', '))."
+              }
+            }
+          }
+
+    # Step 3: Example of installing the BPA package via the API (with safe polling logic)
+    - task: PowerShell@2
+      displayName: "Install BPA Package (msdyn_BpaAnchor) [Example]"
+      env:
+        PowerPlatformToken: $(PowerPlatformToken)
+        BpaPackageJson: $(BpaPackageJson)
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "🚀 Attempting to install BPA (UniqueName = msdyn_BpaAnchor)..."
+          if (-not $env:BpaPackageJson) {
+            Write-Host "❌ BPA package data not available (BPA not found or already processed)."
+            exit 0  # No installation needed if BPA wasn't listed
+          }
+          $bpaPackage = $env:BpaPackageJson | ConvertFrom-Json
+          # If BPA is already installed, skip the installation
+          if ($bpaPackage.state -eq "Installed") {
+            Write-Host "ℹ️ BPA is already installed (current version $($bpaPackage.version)). No installation needed."
+            exit 0
+          }
+          # Trigger the BPA installation via API
+          $headers = @{ Authorization = "Bearer $env:PowerPlatformToken"; 'Content-Type' = 'application/json' }
+          $installUrl = "$(TenantApiBase)/appmanagement/environments/$(EnvironmentId)/applicationPackages/msdyn_BpaAnchor/install?api-version=2022-03-01-preview"
+          $bpaPayload = $env:BpaPackageJson
+          try {
+            $installResponse = Invoke-RestMethod -Method POST -Uri $installUrl -Headers $headers -Body $bpaPayload -ErrorAction Stop
+          } catch {
+            Write-Error "❌ Installation request failed: $_"
+            exit 1
+          }
+          Write-Host "✅ Installation request submitted for BPA (msdyn_BpaAnchor)."
+          # Safe polling: attempt to monitor the operation, but stop if it returns Bad Request
+          $operationId = $null
+          if ($installResponse -and $installResponse.lastOperation) {
+            $operationId = $installResponse.lastOperation.operationId
+          }
+          if ($operationId) {
+            Write-Host "⏳ Monitoring installation (Operation ID = $operationId)..."
+            $maxMinutes = 60
+            $minutes = 0
+            while ($minutes -lt $maxMinutes) {
+              Start-Sleep -Seconds 60
+              $minutes += 1
+              try {
+                $statusUrl = "$(TenantApiBase)/appmanagement/environments/$(EnvironmentId)/operations/$operationId?api-version=2022-03-01-preview"
+                $statusResponse = Invoke-RestMethod -Method GET -Uri $statusUrl -Headers $headers -ErrorAction Stop
+              } catch {
+                # If status polling returns 400 Bad Request, stop polling and advise manual check
+                if ($_ -match "400") {
+                  Write-Host "⚠️ Status polling returned 400 (Bad Request). Stopping polling. Please check BPA installation status manually in the Power Platform admin center."
+                  exit 0
+                }
+                Write-Host "⚠️ Status check error after $minutes min: $_"
+                continue
+              }
+              $state = $statusResponse.state
+              Write-Host "📋 [After $minutes min] BPA installation status = $state"
+              if ($state -eq "Installed") {
+                Write-Host "✅ BPA was installed successfully (final state = Installed)."
+                exit 0
+              }
+              if ($state -match "Failed") {
+                $errMsg = $statusResponse.error.message
+                Write-Error "❌ BPA installation failed (state = $state). Error: $errMsg"
+                exit 1
+              }
+            }
+            Write-Error "❌ Timeout: BPA installation not completed within $maxMinutes minutes."
+            exit 1
+          } else {
+            Write-Host "ℹ️ BPA installation triggered (no operation ID provided). Please verify status manually."
+          }

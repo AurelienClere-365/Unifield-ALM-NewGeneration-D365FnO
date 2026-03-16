@@ -1,0 +1,74 @@
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+- group: MySecureVariables
+
+steps:
+
+# 1. Installer modules
+- task: PowerShell@2
+  displayName: 'Install Az + d365bap.tools'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      Install-Module Az.Accounts -Force -Scope CurrentUser
+      Install-Module d365bap.tools -Force -Scope CurrentUser
+
+# 2. Auth via refresh token utilisateur + d365bap.tools
+- task: PowerShell@2
+  displayName: 'List F&O environments (User Token)'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      Import-Module Az.Accounts -Force
+      Import-Module d365bap.tools -Force
+
+      $tenantId     = "$(TenantId)"
+      $clientId     = "$(ClientId)"
+      $clientSecret = "$(ClientSecret)"
+      $refreshToken = "$(USER_REFRESH_TOKEN)"
+      $scope        = "$(PowerPlatformScope)"
+
+      # 1. Récupérer un access token via refresh token
+      $body = @{
+        client_id     = $clientId
+        client_secret = $clientSecret
+        grant_type    = "refresh_token"
+        refresh_token = $refreshToken
+        scope         = $scope
+      }
+
+      $tokenResponse = Invoke-RestMethod `
+        -Method Post `
+        -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" `
+        -Body $body
+
+      $accessToken = $tokenResponse.access_token
+
+      # 2. Injecter le token dans Az.Accounts
+      Connect-AzAccount `
+        -AccessToken $accessToken `
+        -AccountId "user@domain.com" `
+        -Tenant $tenantId
+
+      # 3. Appeler d365bap.tools
+      Write-Host "Calling Get-BapEnvironment..."
+      $all = Get-BapEnvironment
+
+      $fno = $all | Where-Object { $_.prop_isFnoEnvironment -eq $true }
+
+      $output = "$(Build.ArtifactStagingDirectory)\fno-environments.json"
+      $fno | ConvertTo-Json -Depth 10 | Out-File $output -Encoding UTF8
+      Write-Host "Exported to $output"
+
+# 3. Publier l’artifact
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish F&O environment list'
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)'
+    artifactName: 'fno-info'

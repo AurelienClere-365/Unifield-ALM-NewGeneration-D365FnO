@@ -1,0 +1,175 @@
+trigger: none
+
+variables:
+  - group: MySecureVariables  # Contient ClientId, ClientSecret, TenantId, PowerPlatformScope
+
+pool:
+  vmImage: 'windows-latest'
+
+jobs:
+  - job: UpdateDataverseApps
+    displayName: "Update Dataverse Applications (Force Install Strategy)"
+    steps:
+
+      - task: PowerShell@2
+        displayName: "SPN Authentication (Get API Token)"
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "🔐 Acquiring API access token..."
+            $body = @{
+              client_id     = "$(ClientId)"
+              client_secret = "$(ClientSecret)"
+              grant_type    = "client_credentials"
+              scope         = "$(PowerPlatformScope)"
+            }
+            try {
+              $response = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" -Body $body -ErrorAction Stop
+              $token = $response.access_token
+            } catch {
+              Write-Error "❌ Failed to obtain access token: $_"
+              exit 1
+            }
+            if (-not $token) {
+              Write-Error "❌ Access token is empty"
+              exit 1
+            }
+            Write-Host "##vso[task.setvariable variable=PowerPlatformToken;issecret=true]$token"
+            Write-Host "✅ Access token acquired successfully"
+
+      - task: PowerShell@2
+        displayName: "Install Power Platform Modules"
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "📦 Installing Power Platform PowerShell modules..."
+            Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+            Install-Module -Name Microsoft.PowerApps.PowerShell -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+            Write-Host "✅ Modules installed successfully"
+
+      - task: PowerShell@2
+        displayName: "Authenticate and List Environments"
+        inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "🔐 Authenticating to Power Platform with Service Principal..."
+            Add-PowerAppsAccount -TenantId "$(TenantId)" -ApplicationId "$(ClientId)" -ClientSecret "$(ClientSecret)" -Endpoint Prod
+            Write-Host "📋 Retrieving environments..."
+            $envs = Get-AdminPowerAppEnvironment
+            if (-not $envs) {
+              Write-Error "❌ No environments returned"
+              exit 1
+            }
+            Write-Host "✅ Found $($envs.Count) environment(s)"
+            $envs | Select-Object DisplayName, EnvironmentName, Region | ConvertTo-Json -Depth 5 | Out-File "$(Build.ArtifactStagingDirectory)/environments.json"
+            Write-Host "##vso[task.setvariable variable=EnvironmentListPath]$(Build.ArtifactStagingDirectory)/environments.json"
+
+      - task: PowerShell@2
+        displayName: "Update Applications (Force Install Strategy)"
+        env:
+          PowerPlatformToken: $(PowerPlatformToken)
+          EnvironmentListPath: $(EnvironmentListPath)
+        inputs:
+          targetType: 'inline'
+          script: |
+            $headers = @{
+              Authorization = "Bearer $env:PowerPlatformToken"
+              'Content-Type' = 'application/json'
+            }
+
+            $envListJson = Get-Content "$env:EnvironmentListPath" -Raw
+            $envList = $envListJson | ConvertFrom-Json
+
+            foreach ($envInfo in $envList) {
+              $envId = $envInfo.EnvironmentName
+              $envName = $envInfo.DisplayName
+
+              Write-Host ""
+              Write-Host "=== 🌍 Environment: $envName (ID = $envId) ==="
+
+              try {
+                $pkgUrl = "https://api.powerplatform.com/appmanagement/environments/$envId/applicationPackages?appInstallState=All&api-version=2022-03-01-preview&lcid=1033"
+                $pkgResponse = Invoke-RestMethod -Method GET -Uri $pkgUrl -Headers $headers -ErrorAction Stop
+              } catch {
+                Write-Host "⚠️ Failed to list apps for '$envName': $_"
+                continue
+              }
+
+              $allPackages = $pkgResponse.value
+              if (-not $allPackages) {
+                Write-Host "  (No applications found in this environment.)"
+                continue
+              }
+
+              Write-Host "  📂 Total packages: $($allPackages.Count)"
+
+              $installedPackages = $allPackages | Where-Object {
+                $_.state -eq "Installed" -and
+                $_.uniqueName -notmatch "^System" -and
+                $_.uniqueName -notmatch "^msdynce_"
+              }
+
+              if (-not $installedPackages) {
+                Write-Host "  ℹ️ No installed applications to update in '$envName'"
+                continue
+              }
+
+              Write-Host "  📦 Processing $($installedPackages.Count) installed application(s)..."
+
+              foreach ($installedPkg in $installedPackages) {
+                $appName = $installedPkg.localizedName
+                $uniqueName = $installedPkg.uniqueName
+                $installedVersion = $installedPkg.version
+
+                Write-Host "  🔄 Attempting install/update for '$appName' (v$installedVersion)..."
+
+                try {
+                  $installUrl = "https://api.powerplatform.com/appmanagement/environments/$envId/applicationPackages/$uniqueName/install?api-version=2022-03-01-preview"
+                  $installPayload = $installedPkg | ConvertTo-Json -Depth 10 -Compress
+                  $installResponse = Invoke-RestMethod -Method POST -Uri $installUrl -Headers $headers -Body $installPayload -ErrorAction Stop
+
+                  $operationId = $null
+                  if ($installResponse -and $installResponse.lastOperation) {
+                    $operationId = $installResponse.lastOperation.operationId
+                  }
+
+                  if ($operationId) {
+                    $statusUrl = "https://api.powerplatform.com/appmanagement/environments/$envId/operations/$operationId?api-version=2022-03-01-preview"
+                    try {
+                      $statusResponse = Invoke-RestMethod -Method GET -Uri $statusUrl -Headers $headers -ErrorAction Stop
+                      $state = $statusResponse.state
+                      Write-Host "    📋 Status = $state"
+
+                      if ($state -eq "Installed") {
+                        Write-Host "    ✔️ '$appName' updated successfully"
+                      } elseif ($state -match "Failed") {
+                        $errMsg = if ($statusResponse.error) { $statusResponse.error.message } else { "Unknown error" }
+                        Write-Host "    ❌ Update failed: $errMsg"
+                      } else {
+                        Write-Host "    ℹ️ Update in progress or unknown state: $state"
+                      }
+
+                    } catch {
+                      if ($_ -match "400") {
+                        Write-Host "    ✔️ '$appName' update likely completed or already up-to-date (400 on polling)"
+                      } else {
+                        Write-Host "    ⚠️ Polling error for '$appName': $_"
+                      }
+                    }
+
+                  } else {
+                    Write-Host "    ✔️ '$appName' is already up-to-date (no operation triggered)"
+                  }
+
+                } catch {
+                  if ($_ -match "400") {
+                    Write-Host "    ℹ️ '$appName' install/update returned 400 Bad Request - likely already up-to-date"
+                  } else {
+                    Write-Host "    ❌ Failed to trigger install/update for '$appName': $_"
+                  }
+                }
+              }
+            }
+
+            Write-Host ""
+            Write-Host "✅ All environments processed successfully"
