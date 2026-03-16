@@ -1,0 +1,53 @@
+parameters:
+  - name: environmentUrl
+    type: string
+    default: ''
+  - name: serviceConnectionName
+    type: string
+    default: 'PowerPlatform-ServiceConnection'
+  - name: confirmDeletion
+    type: boolean
+    default: false
+
+trigger: none
+
+pool:
+  vmImage: windows-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    persistCredentials: true
+    displayName: 'Checkout Repository'
+
+  # Safety Check
+  - task: PowerShell@2
+    displayName: 'Validate Deletion Confirmation'
+    inputs:
+      targetType: 'inline'
+      script: |
+        if ("${{ parameters.confirmDeletion }}" -ne "True") {
+          Write-Error "❌ Deletion not confirmed. Set confirmDeletion parameter to true to proceed."
+          exit 1
+        }
+        Write-Host "✅ Deletion confirmed. Proceeding with environment deletion..."
+
+  # Install Power Platform Build Tools
+  - task: PowerPlatformToolInstaller@2
+    displayName: 'Install Power Platform Build Tools'
+
+  # Set Connection Variables from Service Connection
+  - task: PowerPlatformSetConnectionVariables@2
+    displayName: 'Set Connection Variables - ${{ parameters.serviceConnectionName }}'
+    name: ConnectionVariables
+    inputs:
+      authenticationType: PowerPlatformSPN
+      PowerPlatformSPN: '${{ parameters.serviceConnectionName }}'
+
+  # Delete Environment
+  - task: PowerPlatformDeleteEnvironment@2
+    displayName: 'Delete Power Platform Environment'
+    inputs:
+      authenticationType: 'PowerPlatformSPN'
+      PowerPlatformSPN: '${{ parameters.serviceConnectionName }}'
+      Environment: '${{ parameters.environmentUrl }}'

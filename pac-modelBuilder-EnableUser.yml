@@ -1,0 +1,95 @@
+parameters:
+  - name: environmentUrl
+    type: string
+    default: ''
+  - name: variableGroupName
+    type: string
+    default: 'D365FO-OData-Secrets'
+
+trigger: none
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  - group: ${{ parameters.variableGroupName }}
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    persistCredentials: true
+    displayName: 'Checkout Repository'
+
+  # Install Required Modules
+  - task: PowerShell@2
+    displayName: 'Install Required PowerShell Modules'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Install-PackageProvider nuget -Scope CurrentUser -Force -Confirm:$false
+        Write-Host "NuGet installed"
+        
+        Install-Module -Name Az -AllowClobber -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck
+        Write-Host "Az module installed"
+        
+        Install-Module -Name d365fo.integrations -AllowClobber -Scope CurrentUser -Force -Confirm:$false
+        Write-Host "d365fo.integrations module installed"
+
+  # Enable All Disabled Users in D365 F&O
+  - task: PowerShell@2
+    displayName: 'Enable Disabled Users via OData'
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Configure OData connection using variables from variable group
+        Add-D365ODataConfig `
+          -Name "D365EnableUsers" `
+          -Tenant "$(D365TenantId)" `
+          -Url "${{ parameters.environmentUrl }}" `
+          -ClientId "$(D365ClientId)" `
+          -ClientSecret "$(D365ClientSecret)"
+        
+        Write-Host "OData config added"
+        
+        # Set active configuration
+        Set-D365ActiveODataConfig -Name D365EnableUsers
+        Write-Host "OData config set as default"
+        
+        # Generate authentication token
+        $token = Get-D365ODataToken
+        Write-Host "Token generated successfully"
+        
+        # Get all disabled users
+        $SystemUsers = Get-D365ODataEntityData `
+          -EntityName SystemUsers `
+          -ODataQuery '$filter=Enabled eq false' `
+          -Token $token
+        
+        Write-Host "Found $($SystemUsers.Count) disabled users"
+        
+        # Prepare payload for enabling users
+        $payload = '{"Enabled": "true"}'
+        $SystemUsersToUpdateNew = @()
+        
+        # Build batch update array
+        foreach ($user in $SystemUsers) {
+          $userId = $user.UserID
+          $SystemUsersToUpdateNew += [PSCustomObject]@{
+            Key = "UserID='$userId'"
+            Payload = $payload
+          }
+          Write-Host "Queued user: $userId"
+        }
+        
+        # Execute batch update
+        if ($SystemUsersToUpdateNew.Count -gt 0) {
+          Update-D365ODataEntityBatchMode `
+            -EntityName "SystemUsers" `
+            -Payload $SystemUsersToUpdateNew `
+            -Verbose `
+            -Token $token
+          
+          Write-Host "Successfully enabled $($SystemUsersToUpdateNew.Count) users"
+        } else {
+          Write-Host "No disabled users found"
+        }

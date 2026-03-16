@@ -1,0 +1,45 @@
+parameters:
+  - name: environmentUrl
+    type: string
+    default: ''
+  - name: serviceConnectionName
+    type: string
+    default: 'PowerPlatform-ServiceConnection'
+  - name: protectionLevel
+    type: string
+    default: 'Standard'
+    values:
+      - Basic
+      - Standard
+
+trigger: none
+
+pool:
+  vmImage: windows-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    persistCredentials: true
+    displayName: 'Checkout Repository'
+
+  # Install Power Platform Build Tools
+  - task: PowerPlatformToolInstaller@2
+    displayName: 'Install Power Platform Build Tools'
+
+  # Set Connection Variables from Service Connection
+  - task: PowerPlatformSetConnectionVariables@2
+    displayName: 'Set Connection Variables - ${{ parameters.serviceConnectionName }}'
+    name: ConnectionVariables
+    inputs:
+      authenticationType: PowerPlatformSPN
+      PowerPlatformSPN: '${{ parameters.serviceConnectionName }}'
+
+  # Enable Managed Environment with Governance
+  - task: PowerPlatformSetGovernanceConfig@2
+    displayName: 'Configure Managed Environment Governance'
+    inputs:
+      authenticationType: 'PowerPlatformSPN'
+      PowerPlatformSPN: '${{ parameters.serviceConnectionName }}'
+      Environment: '${{ parameters.environmentUrl }}'
+      ProtectionLevel: '${{ parameters.protectionLevel }}'

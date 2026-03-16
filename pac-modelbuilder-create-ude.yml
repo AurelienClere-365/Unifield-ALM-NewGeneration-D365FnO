@@ -1,0 +1,87 @@
+parameters:
+  - name: environmentName
+    type: string
+    default: ''
+  - name: securityGroupId
+    type: string
+    default: ''
+  - name: domainName
+    type: string
+    default: ''
+  - name: variableGroupName
+    type: string
+    default: 'PowerPlatform-Secrets'
+  - name: location
+    type: string
+    default: 'Europe'
+  - name: currencyName
+    type: string
+    default: 'EUR'
+  - name: enableDevTools
+    type: boolean
+    default: true
+  - name: enableDemoData
+    type: boolean
+    default: true
+
+trigger: none
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  - group: ${{ parameters.variableGroupName }}
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+    persistCredentials: true
+    displayName: 'Checkout Repository'
+
+  # Install PowerApps Administration Module
+  - task: PowerShell@2
+    displayName: 'Install PowerApps Administration Module'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Force -Verbose -Scope CurrentUser
+
+  # Create Power Platform Environment
+  - task: PowerShell@2
+    displayName: 'Create D365 F&O Environment'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Creating session against Power Platform API"
+        
+        # Convert secure password from variable group
+        $Password = ConvertTo-SecureString -String "$(PowerPlatformPassword)" -AsPlainText -Force
+        
+        # Authenticate to Power Platform
+        Add-PowerAppsAccount -Endpoint prod -Username "$(PowerPlatformUsername)" -Password $Password -Verbose
+        
+        # Construct provisioning JSON
+        $jsonObject = @"
+        {
+          "PostProvisioningPackages": [
+            {
+              "applicationUniqueName": "msdyn_FinanceAndOperationsProvisioningAppAnchor",
+              "parameters": "DevToolsEnabled=${{ parameters.enableDevTools }}\nDemoDataEnabled=${{ parameters.enableDemoData }}"
+            }
+          ]
+        }
+        "@ | ConvertFrom-Json
+        
+        # Create Environment
+        New-AdminPowerAppEnvironment `
+          -DisplayName "${{ parameters.environmentName }}" `
+          -EnvironmentSku Sandbox `
+          -Templates "D365_FinOps_Finance" `
+          -TemplateMetadata $jsonObject `
+          -LocationName "${{ parameters.location }}" `
+          -ProvisionDatabase `
+          -CurrencyName "${{ parameters.currencyName }}" `
+          -SecurityGroupId "${{ parameters.securityGroupId }}" `
+          -DomainName "${{ parameters.domainName }}" `
+          -WaitUntilFinished $false `
+          -Verbose
