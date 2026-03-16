@@ -1,0 +1,146 @@
+name: $(Date:yy.MM.dd)$(Rev:.r)
+
+trigger:
+  - none
+
+# 🔒 Global pool — applies to ALL stages and jobs 
+pool: 
+  vmImage: 'windows-latest'
+
+schedules:
+  - cron: "0 2 * * *"           # 2:00 every day
+    displayName: Daily Build at 02:00 UTC
+    branches:
+      include:
+        - main
+    always: false
+
+# Global variables stay as-is
+variables:
+  App1Package: 'Microsoft.Dynamics.AX.Application1.DevALM.BuildXpp'
+  App2Package: 'Microsoft.Dynamics.AX.Application2.DevALM.BuildXpp'
+  AppSuitePackage: 'Microsoft.Dynamics.AX.ApplicationSuite.DevALM.BuildXpp'
+  PlatPackage: 'Microsoft.Dynamics.AX.Platform.DevALM.BuildXpp'
+  ToolsPackage: 'Microsoft.Dynamics.AX.Platform.CompilerPackage'
+  MetadataPath: '$(Build.SourcesDirectory)\Metadata'
+  NugetConfigsPath: '$(Build.SourcesDirectory)\Tools\Build'
+  NugetsPath: '$(Pipeline.Workspace)\NuGets'
+
+stages:
+# ---------- Stage 1: Build ----------
+- stage: Build
+  displayName: X++ Build & Package
+  jobs:
+  - job: BuildXpp
+    displayName: Build solution and create deployable package
+    
+    steps:
+      # Install NuGet and use -ExcludeVersion option
+      - task: NuGetCommand@2
+        displayName: 'NuGet custom install Packages'
+        inputs:
+          command: custom
+          arguments: 'install -Noninteractive $(NugetConfigsPath)\packages.config -ConfigFile $(NugetConfigsPath)\nuget.config -Verbosity Detailed -ExcludeVersion -OutputDirectory "$(NugetsPath)"'
+
+      # Use the custom build number y.m.d.rev as the model version
+      - task: XppUpdateModelVersion@0
+        displayName: 'Update Model Version'
+        inputs:
+          XppSourcePath: '$(MetadataPath)'
+          VersionNumber: '$(Build.BuildNumber)'
+          XppLayer: 8
+
+      #Copy Bin Folder
+      - task: CopyFiles@2   
+        displayName: 'Copy Binary Dependencies to: $(Build.BinariesDirectory)'   
+        inputs:     
+          SourceFolder: '$(MetadataPath)'     
+          Contents: '**/bin/**'     
+          TargetFolder: '$(Build.BinariesDirectory)'
+
+      # Build using MSBuild 17 (VS 2022)
+      - task: VSBuild@1
+        displayName: 'Build Project.sln'
+        inputs:
+          solution: 'Projects/BuildProject/BuildProject.sln'
+          vsVersion: '17.0'
+          msbuildArgs: >
+            /p:BuildTasksDirectory="$(NugetsPath)\$(ToolsPackage)\DevAlm"
+            /p:MetadataDirectory="$(MetadataPath)"
+            /p:FrameworkDirectory="$(NuGetsPath)\$(ToolsPackage)"
+            /p:ReferenceFolder="$(NuGetsPath)\$(PlatPackage)\ref\net40;$(NuGetsPath)\$(App1Package)\ref\net40;$(NuGetsPath)\$(App2Package)\ref\net40;$(NuGetsPath)\$(AppSuitePackage)\ref\net40;$(MetadataPath);$(Build.BinariesDirectory)"
+            /p:ReferencePath="$(NuGetsPath)\$(ToolsPackage)"
+            /p:OutputDirectory="$(Build.BinariesDirectory)"
+
+      # Copy compiler log files to drop
+      - task: CopyFiles@2
+        displayName: 'Copy X++ Compile Log Files to: $(Build.ArtifactStagingDirectory)\Logs'
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)'
+          Contents: |
+            **\Dynamics.AX.*.xppc.*
+            **\Dynamics.AX.*.labelc.*
+            **\Dynamics.AX.*.reportsc.*
+          TargetFolder: '$(Build.ArtifactStagingDirectory)\Logs'
+        condition: succeededOrFailed()
+
+      # For packaging we need NuGet < 3.4.0
+      - task: NuGetToolInstaller@0
+        displayName: 'Use NuGet 3.3.0'
+        inputs:
+          versionSpec: 3.3.0
+
+      - task: XppCreatePackage@2
+        displayName: Create Deployable Package
+        inputs:
+          XppToolsPath: '$(NuGetsPath)\$(ToolsPackage)'
+          XppBinariesPath: '$(Build.BinariesDirectory)'
+          CreateCloudPackage: true
+          CloudPackagePlatVersion: '7.0.7778.29'
+          CloudPackageAppVersion: '10.0.2428.63'
+          CloudPackageOutputLocation: '$(Build.ArtifactStagingDirectory)\CloudDeployablePackage_$(Build.BuildNumber)'
+          CreateRegularPackage: true
+          DeployablePackagePath: '$(Build.ArtifactStagingDirectory)\AXDeployableRuntime_$(Build.BuildNumber).zip'
+
+      # Enable to add license file to the package
+      - task: XppAddLicenseToPackage@0
+        displayName: 'Add Licenses to Deployable Package'
+        enabled: false
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact: drop'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        condition: succeededOrFailed()
+
+# ---------- Stage 2: Deploy UAT ----------
+- stage: DeployUAT
+  displayName: Deploy to UAT
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToUAT
+    timeoutInMinutes: 360
+    pool:
+      vmImage: 'windows-latest'
+    displayName: Deploy package to UAT
+    environment: 'D365-UAT'   # create this Environment in Azure DevOps and add approvals/checks as needed
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - task: PowerPlatformToolInstaller@2
+              displayName: 'Power Platform Tool Installer '
+
+            - task: PowerPlatformWhoAmi@2
+              displayName: 'Power Platform WhoAmI '
+              inputs:
+                authenticationType: PowerPlatformSPN
+                PowerPlatformSPN: 'USE'
+
+            - task: PowerPlatformDeployPackage@2
+              displayName: 'Power Platform Deploy Package '
+              inputs:
+                authenticationType: PowerPlatformSPN
+                PowerPlatformSPN: 'USE'
+                PackageFile: '$(Pipeline.Workspace)/drop/CloudDeployablePackage_$(Build.BuildNumber)/TemplatePackage.dll'
