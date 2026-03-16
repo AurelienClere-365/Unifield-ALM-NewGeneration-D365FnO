@@ -16,18 +16,20 @@ This project provides ready-to-use YAML pipelines to automate CI/CD workflows fo
 
 ## 📦 Pipeline Summary
 
-| File Name                          | Description                                      |
-|-----------------------------------|--------------------------------------------------|
-| `xpp-ci.yml`                      | CI pipeline for building and packaging X++ code  |
-| `xpp-build-validation.yml`        | Validates X++ builds before deployment           |
-| `azure-build-pipelines-main.yml`  | Main branch build pipeline in LCS mode                       |
-| `azure-build-pipelines-test.yml`  | Test/UAT environment build pipeline in LCS mode             |
-| `pac-modelbuilder-*.yml`          | Manage Power Platform model builder environments |
-| `lcs-db-refresh-export.yml`       | Automate LCS database refresh/export             |
-| `bpa-apps-dataverse.yml`          | BPA deployment to Dataverse                      |
-| `process-update-dataverse.yml`    | Update Dataverse environments                    |
-| `copy-environment.yml`            | Clone environment configurations                 |
-| `d365bap-tools.yml`               | Utilities for D365 business apps                 |
+| File Name                          | Description |
+|-----------------------------------|-------------|
+| `xpp-ci.yml`                      | CI pipeline for compiling X++ code, running validations, and generating deployable packages for unified environments. |
+| `xpp-build-validation.yml`        | Lightweight pipeline to validate X++ builds without deploying, useful for pull requests or early-stage testing. |
+| `azure-build-pipelines-main.yml`  | LCS Mode : Main branch build pipeline for production-ready deployments, including full package generation and artifact publishing. |
+| `azure-build-pipelines-test.yml`  | LCS Mode : Similar to the main pipeline but tailored for test/UAT environments, often with different variables or deployment targets. |
+| `pac-modelbuilder-create-ude.yml` | Creates a Unified Developer Environment (UDE) using Power Platform CLI and model builder tools. |
+| `pac-modelbuilder-manageenvironment-ude.yml` | Manages lifecycle tasks for UDEs, such as updates or configuration changes. |
+| `pac.modelbuilder-delete.yml`     | Deletes a UDE environment cleanly from Power Platform. |
+| `lcs-db-refresh-export.yml`       | Automates database refresh/export operations via Lifecycle Services (LCS) for sandbox or UAT environments. |
+| `bpa-apps-dataverse.yml`          | Deploys Business Process Automation (BPA) apps to Dataverse environments using Power Platform Build Tools. |
+| `process-update-dataverse.yml`    | Updates existing Dataverse solutions or components as part of a release pipeline. |
+| `copy-environment.yml`            | Copies configuration or data from one environment to another, useful for cloning or templating. |
+| `d365bap-tools.yml`               | Utility pipeline for deploying or managing D365 Business Application Platform (BAP) tools. |
 
 ## 🛠️ Getting Started
 
