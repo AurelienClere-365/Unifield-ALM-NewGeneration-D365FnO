@@ -1,0 +1,138 @@
+# Pipeline Name: LCS Database Refresh - Production to Sandbox Tier2
+# Description: Nightly automated database refresh from Production to Sandbox Tier 2 with export
+# Schedule: Every night at 2:00 AM UTC
+# Author: [Your Name]
+# Last Updated: 2026-03-14
+
+trigger: none  # Disable CI triggers
+
+schedules:
+- cron: '0 2 * * *'  # 2:00 AM UTC daily
+  displayName: 'Nightly Database Refresh'
+  branches:
+    include:
+    - main
+  always: true
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+- group: LCS-Database-Refresh-Secrets  # Variable group with secrets
+
+stages:
+- stage: DatabaseRefreshAndExport
+  displayName: 'Database Refresh and Export'
+  jobs:
+  - job: RefreshDatabase
+    displayName: 'Refresh and Export Job'
+    timeoutInMinutes: 480  # 8 hours
+
+    steps:
+    - powershell: |
+        Write-Host "Starting LCS Database Refresh Pipeline"
+        Write-Host "Project ID: $(LCS_PROJECT_ID)"
+        Write-Host "Source Env: $(LCS_SOURCE_ENV_ID)"
+        Write-Host "Target Env: $(LCS_TARGET_ENV_ID)"
+      displayName: 'Display Pipeline Info'
+
+    - powershell: |
+        $tokenUrl = "https://login.microsoftonline.com/$(AAD_TENANT_ID)/oauth2/v2.0/token"
+        $body = @{
+          grant_type = "password"
+          client_id = "$(AAD_CLIENT_ID)"
+          scope = "https://lcsapi.lcs.dynamics.com//.default"
+          username = "$(LCS_SERVICE_USERNAME)"
+          password = "$(LCS_SERVICE_PASSWORD)"
+        }
+        $response = Invoke-RestMethod -Method POST -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+        Write-Host "##vso[task.setvariable variable=BearerToken;issecret=true]$($response.access_token)"
+      displayName: 'Get Bearer Token'
+
+    - powershell: |
+        $url = "https://lcsapi.lcs.dynamics.com/databasemovement/v1/refresh/project/$(LCS_PROJECT_ID)/source/$(LCS_SOURCE_ENV_ID)/target/$(LCS_TARGET_ENV_ID)"
+        $headers = @{
+          Authorization = "Bearer $(BearerToken)"
+          "x-ms-version" = "2017-09-15"
+          "Content-Type" = "application/json"
+        }
+        $response = Invoke-RestMethod -Method POST -Uri $url -Headers $headers
+        if ($response.IsSuccess) {
+          Write-Host "##vso[task.setvariable variable=RefreshOperationId]$($response.OperationActivityId)"
+        } else {
+          Write-Error "Refresh failed: $($response.ErrorMessage)"
+          exit 1
+        }
+      displayName: 'Start Database Refresh'
+
+    - powershell: |
+        $timeout = (Get-Date).AddHours(6)
+        $complete = $false
+        $pollCount = 0
+
+        function GetToken {
+          $body = @{
+            grant_type = "password"
+            client_id = "$(AAD_CLIENT_ID)"
+            scope = "https://lcsapi.lcs.dynamics.com//.default"
+            username = "$(LCS_SERVICE_USERNAME)"
+            password = "$(LCS_SERVICE_PASSWORD)"
+          }
+          $url = "https://login.microsoftonline.com/$(AAD_TENANT_ID)/oauth2/v2.0/token"
+          return (Invoke-RestMethod -Method POST -Uri $url -Body $body -ContentType "application/x-www-form-urlencoded").access_token
+        }
+
+        do {
+          $pollCount++
+          $token = GetToken
+          $url = "https://lcsapi.lcs.dynamics.com/databasemovement/v1/fetchstatus/project/$(LCS_PROJECT_ID)/environment/$(LCS_TARGET_ENV_ID)/operationactivity/$(RefreshOperationId)"
+          $headers = @{
+            Authorization = "Bearer $token"
+            "x-ms-version" = "2017-09-15"
+            "Content-Type" = "application/json"
+          }
+          try {
+            $status = Invoke-RestMethod -Method GET -Uri $url -Headers $headers
+            Write-Host "[$pollCount] Status: $($status.OperationStatus)"
+            if ($status.OperationStatus -eq "Completed" -or $status.OperationStatus -eq "Succeeded") {
+              $complete = $true
+            } elseif ($status.OperationStatus -eq "Failed" -or $status.OperationStatus -eq "Cancelled") {
+              Write-Error "Refresh failed or cancelled"
+              exit 1
+            } else {
+              Start-Sleep -Seconds 300
+            }
+          } catch {
+            Write-Warning "Polling failed: $_"
+            Start-Sleep -Seconds 300
+          }
+        } while (-not $complete -and (Get-Date) -lt $timeout)
+      displayName: 'Poll Refresh Status'
+
+    - powershell: |
+        $tokenUrl = "https://login.microsoftonline.com/$(AAD_TENANT_ID)/oauth2/v2.0/token"
+        $body = @{
+          grant_type = "password"
+          client_id = "$(AAD_CLIENT_ID)"
+          scope = "https://lcsapi.lcs.dynamics.com//.default"
+          username = "$(LCS_SERVICE_USERNAME)"
+          password = "$(LCS_SERVICE_PASSWORD)"
+        }
+        $response = Invoke-RestMethod -Method POST -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+        $token = $response.access_token
+
+        $backupName = "ProdBackup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        $url = "https://lcsapi.lcs.dynamics.com/databasemovement/v1/export/project/$(LCS_PROJECT_ID)/environment/$(LCS_TARGET_ENV_ID)/backupName/$backupName"
+        $headers = @{
+          Authorization = "Bearer $token"
+          "x-ms-version" = "2017-09-15"
+          "Content-Type" = "application/json"
+        }
+        $export = Invoke-RestMethod -Method POST -Uri $url -Headers $headers
+        if ($export.IsSuccess) {
+          Write-Host "Export started successfully. Operation ID: $($export.OperationActivityId)"
+        } else {
+          Write-Error "Export failed: $($export.ErrorMessage)"
+          exit 1
+        }
+      displayName: 'Start Database Export'
