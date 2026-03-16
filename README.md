@@ -48,6 +48,10 @@ This project provides ready-to-use YAML pipelines to automate CI/CD workflows fo
    ```bash
    git clone https://github.com/AurelienClere-365/Unifield-ALM-NewGeneration-D365FnO.git
 
+## 📖 Learn More
+
+For a full walkthrough and background on this project, check out the blog post:  
+👉 [D365 FinOps DevOps and GitHub ALM New Generation](https://www.powerazure365.com/blog-1/d365-finops-devops-and-github-alm-new-generation)
 
 ## 🤝 Contributing
 
