@@ -1,6 +1,7 @@
 # Unified-ALM-NewGeneration-D365FnO
 
 A collection of Azure DevOps pipeline templates for implementing Application Lifecycle Management (ALM) in Dynamics 365 Finance & Operations (D365FnO) using the Unified Developer Experience and Power Platform integration.
+Of course, those YAML pipelines could be also used into a GitHub project for F&O, see for that my deep dive article : https://www.powerazure365.com/blog-1/d365-finops-devops-and-github-alm-new-generation
 
 ## 🚀 Overview
 
