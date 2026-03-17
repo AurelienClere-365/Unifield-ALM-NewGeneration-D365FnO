@@ -4,58 +4,66 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-- group: MySecureVariables  # Contient TenantId, ClientId, ClientSecret, SourceEnvironmentId, TargetEnvironmentId
+- group: MySecureVariables
+  # Contains TenantId, ClientId, ClientSecret, SourceEnvironmentId, TargetEnvironmentId
 
-steps:
-
-# Étape 1 : Installer les modules PowerShell requis
-- task: PowerShell@2
-  displayName: "Installer les modules PowerShell Power Platform"
-  inputs:
-    targetType: 'inline'
-    script: |
-      Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
-      Install-Module -Name Microsoft.PowerApps.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
-
-# Étape 2 : Authentification + Copie dans la même session PowerShell
-- task: PowerShell@2
-  displayName: "Authentification + Copie de l'environnement Power Platform"
+jobs:
+- job: CopyEnvironment
+  displayName: "Power Platform Environment Copy"
   timeoutInMinutes: 360
-  inputs:
-    targetType: 'inline'
-    script: |
-      # Authentification via SPN
-      Write-Host "Authentification avec Add-PowerAppsAccount..."
-      Add-PowerAppsAccount `
-        -Endpoint prod `
-        -TenantID "$(TenantId)" `
-        -ApplicationId "$(ClientId)" `
-        -ClientSecret "$(ClientSecret)" `
-        -Verbose
 
-      # Préparation des paramètres de copie
-      $copyToRequest = [pscustomobject]@{
-          SourceEnvironmentId = "$(SourceEnvironmentId)"
-          TargetEnvironmentName = "Copied from source"
-          CopyType = "FullCopy"
-          SkipAuditData = $true
-          ExecuteAdvancedCopyForFinanceAndOperations = $true
-      }
+  steps:
 
-      Write-Host "Début de la copie de l'environnement..."
-      try {
-          $result = Copy-PowerAppEnvironment `
-              -EnvironmentName "$(TargetEnvironmentId)" `
-              -CopyToRequestDefinition $copyToRequest `
-              -WaitUntilFinished $true `
-              -TimeoutInMinutes 180 `
-              -Verbose `
-              -ErrorAction Stop
+  # ---------------------------------------------------------
+  # Step 1 — Install required PowerShell modules
+  # ---------------------------------------------------------
+  - task: PowerShell@2
+    displayName: "Install Power Platform PowerShell modules"
+    inputs:
+      targetType: 'inline'
+      script: |
+        Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
+        Install-Module -Name Microsoft.PowerApps.PowerShell -Force -Scope CurrentUser -AllowClobber -Verbose
 
-          Write-Host "✅ Copie lancée avec succès."
-          Write-Host "Résultat : $($result | Out-String)"
-      }
-      catch {
-          Write-Error "❌ Erreur lors de la copie de l'environnement : $_"
-          exit 1
-      }
+  # ---------------------------------------------------------
+  # Step 2 — Authenticate + Copy environment
+  # ---------------------------------------------------------
+  - task: PowerShell@2
+    displayName: "Authenticate and copy Power Platform environment"
+    timeoutInMinutes: 360   # Must be <= job timeout
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Authenticating with Add-PowerAppsAccount..."
+        Add-PowerAppsAccount `
+          -Endpoint prod `
+          -TenantID "$(TenantId)" `
+          -ApplicationId "$(ClientId)" `
+          -ClientSecret "$(ClientSecret)" `
+          -Verbose
+
+        $copyToRequest = [pscustomobject]@{
+            SourceEnvironmentId = "$(SourceEnvironmentId)"
+            TargetEnvironmentName = "Copied from source"
+            CopyType = "FullCopy"
+            SkipAuditData = $true
+            ExecuteAdvancedCopyForFinanceAndOperations = $true
+        }
+
+        Write-Host "Starting environment copy..."
+        try {
+            $result = Copy-PowerAppEnvironment `
+                -EnvironmentName "$(TargetEnvironmentId)" `
+                -CopyToRequestDefinition $copyToRequest `
+                -WaitUntilFinished $true `
+                -TimeoutInMinutes 360 `
+                -Verbose `
+                -ErrorAction Stop
+
+            Write-Host "✅ Copy successfully started."
+            Write-Host "Result: $($result | Out-String)"
+        }
+        catch {
+            Write-Error "❌ Error during environment copy: $_"
+            exit 1
+        }
